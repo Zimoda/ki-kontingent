@@ -1,0 +1,63 @@
+name: Build
+
+# Startet bei jedem Push auf main, manuell oder bei einem Versions-Tag (z. B. v1.0.0).
+# Bei einem Tag wird automatisch ein Release mit den fertigen Dateien angelegt.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: KI-Kontingent-Windows
+          - os: macos-latest            # Apple Silicon (M1 und neuer)
+            artifact: KI-Kontingent-macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: PyInstaller installieren
+        run: pip install pyinstaller
+
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile --noconsole --name KI-Kontingent ki_kontingent.py
+          Compress-Archive -Path dist/KI-Kontingent.exe -DestinationPath ${{ matrix.artifact }}.zip
+
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --windowed --name KI-Kontingent \
+            --osx-bundle-identifier de.kikontingent.widget ki_kontingent.py
+          cd dist && ditto -c -k --keepParent KI-Kontingent.app ../${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          generate_release_notes: true
