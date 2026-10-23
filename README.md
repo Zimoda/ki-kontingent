@@ -50,10 +50,7 @@ pyinstaller --windowed --name KI-Kontingent ki_kontingent.py               # mac
 ```
 Oder ohne Build: `python ki_kontingent.py` (Vorschau mit Beispieldaten: `--demo`).
 
-Neue Version veröffentlichen: Tag pushen (`git tag v1.0.0 && git push --tags`) – GitHub baut beide Versionen und legt das Release automatisch an.
-
-## Lizenz
-MIT – siehe [LICENSE](LICENSE).
+Neue Version veröffentlichen: auf GitHub unter *Releases → Draft a new release* einen neuen Tag (z. B. `v1.1.0`) anlegen – GitHub baut beide Versionen und hängt sie automatisch an.
 
 ## Lizenz
 MIT – siehe [LICENSE](LICENSE).
