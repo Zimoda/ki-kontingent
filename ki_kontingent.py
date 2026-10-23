@@ -13,10 +13,12 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.error
 import urllib.request
 
+__version__ = "1.1.0"
 HOME = os.path.expanduser("~")
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -145,20 +147,138 @@ def mix(c1, c2, t):
 
 
 # ---------------------------------------------------------------- Anbieter
-def load_claude_credentials(custom_path=""):
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_TOKEN_URLS = ["https://platform.claude.com/v1/oauth/token",
+                     "https://console.anthropic.com/v1/oauth/token"]
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_KEYCHAIN = "Claude Code-credentials"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+
+class LoginExpired(Exception):
+    """Login abgelaufen und nicht automatisch erneuerbar."""
+
+    def __init__(self, provider):
+        super().__init__(provider)
+        self.provider = provider
+
+
+def http_post_json(url, body, headers=None, timeout=20):
+    h = {"Content-Type": "application/json", "Accept": "application/json"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                 headers=h, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json_atomic(path, data):
+    """Schreibt erst eine Temp-Datei und tauscht sie dann aus - nie halbe Dateien."""
+    tmp = path + ".kik-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o777)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def is_writable(path):
+    return os.access(path, os.W_OK) and os.access(os.path.dirname(path) or ".", os.W_OK)
+
+
+class ClaudeCredentials:
     """Claude-Code-Login: Windows/Linux als Datei, macOS im Schluesselbund."""
-    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
-    path = custom_path or os.path.join(base, ".credentials.json")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    if IS_MAC:
-        out = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=10)
-        if out.returncode == 0 and out.stdout.strip():
-            return json.loads(out.stdout.strip())
-    raise FileNotFoundError(path)
+
+    def __init__(self, custom_path=""):
+        base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(HOME, ".claude")
+        self.path = custom_path or os.path.join(base, ".credentials.json")
+        self.source = None
+        self.account = None
+        self.data = None
+
+    def load(self):
+        if os.path.exists(self.path):
+            self.data, self.source = read_json(self.path), "file"
+            return self.data
+        if IS_MAC:
+            out = subprocess.run(["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN, "-w"],
+                                 capture_output=True, text=True, timeout=10)
+            if out.returncode == 0 and out.stdout.strip():
+                self.data, self.source = json.loads(out.stdout.strip()), "keychain"
+                meta = subprocess.run(["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN],
+                                      capture_output=True, text=True, timeout=10)
+                import re
+                m = re.search(r'"acct"<blob>="([^"]*)"', meta.stdout + meta.stderr)
+                self.account = m.group(1) if m else None
+                return self.data
+        raise FileNotFoundError(self.path)
+
+    @property
+    def oauth(self):
+        return self.data["claudeAiOauth"]
+
+    def can_save(self):
+        if self.source == "file":
+            return is_writable(self.path)
+        return self.source == "keychain" and bool(self.account)
+
+    def save(self):
+        if self.source == "file":
+            write_json_atomic(self.path, self.data)
+        elif self.source == "keychain" and self.account:
+            out = subprocess.run(["security", "add-generic-password", "-U", "-s", CLAUDE_KEYCHAIN,
+                                  "-a", self.account, "-w", json.dumps(self.data)],
+                                 capture_output=True, text=True, timeout=10)
+            if out.returncode != 0:
+                raise OSError("Schluesselbund: " + (out.stderr.strip() or "Schreiben fehlgeschlagen"))
+        else:
+            raise OSError("Login kann nicht gespeichert werden")
+
+
+def refresh_claude(store):
+    """Erneuert den Claude-Code-Zugang und speichert ihn zurueck,
+    damit Claude Code selbst angemeldet bleibt."""
+    store.load()  # frisch lesen - evtl. hat Claude Code gerade selbst erneuert
+    oauth = store.oauth
+    rt = oauth.get("refreshToken")
+    if not rt or not store.can_save():
+        raise LoginExpired("claude")
+    body = {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLAUDE_CLIENT_ID}
+    tok, last_err = None, None
+    for url in CLAUDE_TOKEN_URLS:
+        try:
+            tok = http_post_json(url, body, {"User-Agent": "claude-code/2.0"})
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401):
+                raise LoginExpired("claude")
+            last_err = e
+        except urllib.error.URLError as e:
+            last_err = e
+    if tok is None:
+        raise last_err
+    oauth["accessToken"] = tok["access_token"]
+    if tok.get("refresh_token"):
+        oauth["refreshToken"] = tok["refresh_token"]
+    if tok.get("expires_in"):
+        oauth["expiresAt"] = int((time.time() + float(tok["expires_in"])) * 1000)
+    store.save()
+    return oauth
+
+
+def claude_usage(token):
+    h = {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20",
+         "User-Agent": "claude-code/2.0", "Accept": "application/json"}
+    return http_json(CLAUDE_USAGE_URL, h)
 
 
 def fetch_claude(cfg):
@@ -172,12 +292,19 @@ def fetch_claude(cfg):
         org = next((o for o in orgs if "chat" in (o.get("capabilities") or [])), orgs[0])
         data = http_json(f"https://claude.ai/api/organizations/{org['uuid']}/usage", h)
     else:
-        # Variante A: Anmeldung von Claude Code (%USERPROFILE%\.claude\.credentials.json)
-        creds = load_claude_credentials(c.get("credentials_path"))
-        token = creds["claudeAiOauth"]["accessToken"]
-        h = {"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20",
-             "User-Agent": "claude-code/2.0", "Accept": "application/json"}
-        data = http_json("https://api.anthropic.com/api/oauth/usage", h)
+        # Variante A: Anmeldung von Claude Code
+        store = ClaudeCredentials(c.get("credentials_path"))
+        store.load()
+        oauth = store.oauth
+        expires = (oauth.get("expiresAt") or 0) / 1000
+        if expires and expires < time.time() + 120:
+            oauth = refresh_claude(store)
+        try:
+            data = claude_usage(oauth["accessToken"])
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                raise
+            data = claude_usage(refresh_claude(store)["accessToken"])
 
     debug_dump(cfg, "claude", data)
     rows = []
@@ -191,13 +318,37 @@ def fetch_claude(cfg):
     return rows
 
 
-def fetch_chatgpt(cfg):
-    # Anmeldung der Codex-App/CLI (%USERPROFILE%\.codex\auth.json)
+def codex_auth_path(cfg):
     base = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
-    path = cfg["chatgpt"].get("auth_path") or os.path.join(base, "auth.json")
-    with open(path, encoding="utf-8") as f:
-        auth = json.load(f)
+    return cfg["chatgpt"].get("auth_path") or os.path.join(base, "auth.json")
+
+
+def refresh_codex(path):
+    """Erneuert den Codex-Zugang und speichert ihn zurueck in auth.json."""
+    auth = read_json(path)
     t = auth.get("tokens") or {}
+    rt = t.get("refresh_token")
+    if not rt or not is_writable(path):
+        raise LoginExpired("chatgpt")
+    try:
+        tok = http_post_json(CODEX_TOKEN_URL, {
+            "client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token",
+            "refresh_token": rt, "scope": "openid profile email"})
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401):
+            raise LoginExpired("chatgpt")
+        raise
+    for src, dst in (("access_token", "access_token"), ("refresh_token", "refresh_token"),
+                     ("id_token", "id_token")):
+        if tok.get(src):
+            t[dst] = tok[src]
+    auth["tokens"] = t
+    auth["last_refresh"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    write_json_atomic(path, auth)
+    return t
+
+
+def codex_usage(t):
     token = t.get("access_token")
     if not token:
         raise ValueError("Kein ChatGPT-Login in auth.json")
@@ -205,7 +356,23 @@ def fetch_chatgpt(cfg):
          "Accept": "application/json"}
     if t.get("account_id"):
         h["ChatGPT-Account-Id"] = t["account_id"]
-    data = http_json("https://chatgpt.com/backend-api/wham/usage", h)
+    return http_json(CODEX_USAGE_URL, h)
+
+
+def fetch_chatgpt(cfg):
+    # Anmeldung der Codex-App/CLI (%USERPROFILE%\.codex\auth.json)
+    path = codex_auth_path(cfg)
+    t = read_json(path).get("tokens") or {}
+    try:
+        data = codex_usage(t)
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        fresh = read_json(path).get("tokens") or {}
+        if fresh.get("access_token") and fresh.get("access_token") != t.get("access_token"):
+            data = codex_usage(fresh)          # Codex hat inzwischen selbst erneuert
+        else:
+            data = codex_usage(refresh_codex(path))
 
     debug_dump(cfg, "chatgpt", data)
     rl = data.get("rate_limit") or data
@@ -239,15 +406,33 @@ PROVIDERS = [("claude", "CLAUDE", "#ff8a5c", fetch_claude),
 
 
 def friendly_error(e):
+    if isinstance(e, LoginExpired):
+        if e.provider == "claude":
+            return "LOGIN ABGELAUFEN  -  Claude Code einmal starten und anmelden"
+        return "LOGIN ABGELAUFEN  -  Codex einmal starten und anmelden"
     if isinstance(e, FileNotFoundError):
         return "NICHT ANGEMELDET  -  Login-Datei fehlt"
     if isinstance(e, urllib.error.HTTPError):
         if e.code in (401, 403):
-            return f"LOGIN ABGELAUFEN ({e.code})  -  App einmal oeffnen"
+            return f"ZUGRIFF VERWEIGERT ({e.code})"
+        if e.code == 429:
+            return "ZU VIELE ANFRAGEN  -  versuche es gleich erneut"
         return f"SERVERFEHLER {e.code}"
     if isinstance(e, urllib.error.URLError):
         return "KEINE VERBINDUNG"
     return str(e)[:60]
+
+
+def log_error(cfg, provider, err):
+    if not cfg.get("debug"):
+        return
+    import traceback
+    try:
+        with open(os.path.join(APP_DIR, "ki_kontingent.log"), "a", encoding="utf-8") as f:
+            f.write(f"--- {dt.datetime.now():%Y-%m-%d %H:%M:%S} {provider} v{__version__}\n")
+            f.write("".join(traceback.format_exception(type(err), err, err.__traceback__)))
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- Bausteine
@@ -453,6 +638,8 @@ class Widget:
 
         self.menu = tk.Menu(r, tearoff=0, bg=PANEL, fg=TEXT, activebackground=BORDER,
                             activeforeground=CYAN, bd=0)
+        self.menu.add_command(label=f"KI-Kontingent v{__version__}", state="disabled")
+        self.menu.add_separator()
         self.menu.add_command(label="Jetzt aktualisieren", command=self.refresh)
         self.topmost = tk.BooleanVar(value=True)
         self.menu.add_checkbutton(label="Immer im Vordergrund", variable=self.topmost,
@@ -518,6 +705,7 @@ class Widget:
             try:
                 res[key] = (demo_fetch(key) if DEMO else fn(self.cfg), None)
             except Exception as e:
+                log_error(self.cfg, key, e)
                 res[key] = (None, friendly_error(e))
         self.pending = res
 

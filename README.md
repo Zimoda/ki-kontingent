@@ -27,6 +27,8 @@ Ein Anbieter ohne Login zeigt einfach „Nicht angemeldet“. In der Konfigurati
 
 **Datenschutz:** Die Zugangsdaten verlassen deinen Rechner nur in Richtung des jeweiligen Anbieters (Anthropic bzw. OpenAI). Es gibt keinen eigenen Server, keine Telemetrie.
 
+Läuft der Login ab, erneuert das Widget ihn automatisch und speichert ihn zurück – Claude Code bzw. Codex bleiben dabei angemeldet. Nur wenn das nicht klappt (z. B. nach Abmelden), erscheint „Login abgelaufen“: dann Claude Code bzw. Codex einmal starten und anmelden.
+
 ## Bedienung
 - Ziehen mit linker Maustaste · Doppelklick = aktualisieren
 - Rechtsklick (Mac: auch Ctrl-Klick) = Menü: Aktualisieren, Vordergrund an/aus, Konfiguration, Beenden
@@ -36,7 +38,7 @@ Ein Anbieter ohne Login zeigt einfach „Nicht angemeldet“. In der Konfigurati
 |---|---|
 | `interval_minutes` | Abfrage-Intervall (Standard 5) |
 | `opacity` | Transparenz 0.5–1.0 |
-| `debug` | schreibt die Rohantworten als `debug_*.json` neben die Konfiguration |
+| `debug` | schreibt die Rohantworten als `debug_*.json` und Fehler in `ki_kontingent.log` neben die Konfiguration |
 
 ## Autostart
 - Windows: `Win + R` → `shell:startup` → Verknüpfung zur `.exe` hineinlegen
