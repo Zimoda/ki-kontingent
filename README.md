@@ -38,11 +38,12 @@ Die DeepSeek-API kennt keine 5-Stunden- oder Wochenfenster. Abrufbar ist nur das
 | `$7,60` | aktuelles Gesamtguthaben (`total_balance`) |
 | Balken | Guthaben im Verhältnis zu `MAX` bzw. `BUDGET` |
 | `AUFGELADEN $5,60` | selbst aufgeladenes Guthaben (`topped_up_balance`) |
+| `-$0,35/TAG` | Verbrauch pro Tag (Aufladungen zählen nicht mit) |
 | `GRANT $2,00` | gewährtes Guthaben, falls vorhanden |
 | `MAX $20,00` | höchster Stand, den das Widget je gesehen hat |
-| `NOCH ~9 TAGE` | Schätzung aus dem Verbrauch der letzten 7 Tage |
+| `NOCH ~9 TAGE` | Prognose: Guthaben ÷ Verbrauch pro Tag |
 
-Die Messpunkte dafür liegen in `deepseek_history.json` neben der `config.json` (höchstens alle 10 Minuten, 30 Tage Aufbewahrung, pro Währung getrennt).
+Die Messpunkte dafür liegen in `deepseek_history.json` neben der `config.json` (jeder Abruf ein Messpunkt, 30 Tage Aufbewahrung, pro Währung getrennt). Die Prognose erscheint, sobald zwei Messpunkte über mindestens eine halbe Stunde vorliegen – also nach etwa einer Stunde Laufzeit.
 
 ## Bedienung
 - Ziehen mit linker Maustaste · Doppelklick = aktualisieren

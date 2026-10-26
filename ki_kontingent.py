@@ -20,7 +20,7 @@ import tkinter as tk
 import urllib.error
 import urllib.request
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 HOME = os.path.expanduser("~")
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -471,11 +471,11 @@ def ds_history_add(total, currency, now):
         hist = []
     stamp = int(now.timestamp())
     hist = [h for h in hist if len(h) > 2 and h[2] == currency]   # Waehrungen nie mischen
-    if hist and stamp - int(hist[-1][0]) < 600:      # hoechstens alle 10 Minuten
+    if hist and stamp - int(hist[-1][0]) < 60:      # doppelte Messung direkt hintereinander
         hist[-1] = [stamp, total, currency]
     else:
         hist.append([stamp, total, currency])
-    hist = [h for h in hist if stamp - int(h[0]) <= 30 * 86400][-500:]
+    hist = [h for h in hist if stamp - int(h[0]) <= 30 * 86400][-4000:]
     try:
         with open(DS_HISTORY_PATH, "w", encoding="utf-8") as f:
             json.dump(hist, f)
@@ -484,19 +484,19 @@ def ds_history_add(total, currency, now):
     return hist
 
 
-def ds_days_left(hist, total, now):
-    """Wie lange reicht das Guthaben noch? Basis: Verbrauch der letzten 7 Tage."""
-    if len(hist) < 2 or total <= 0:
+def ds_burn(hist, total, now, window_days=14):
+    """Verbrauch pro Tag aus den Messpunkten - Aufladungen zaehlen nicht mit."""
+    if total <= 0:
         return None
-    cutoff = now.timestamp() - 7 * 86400
+    cutoff = now.timestamp() - window_days * 86400
     pts = [(int(h[0]), ds_num(h[1])) for h in hist if int(h[0]) >= cutoff]
     if len(pts) < 2:
         return None
-    days = (pts[-1][0] - pts[0][0]) / 86400
-    spent = pts[0][1] - pts[-1][1]
-    if days < 0.25 or spent <= 0:
+    span = (pts[-1][0] - pts[0][0]) / 86400
+    spent = sum(max(0.0, a[1] - b[1]) for a, b in zip(pts, pts[1:]))
+    if span < 0.5 / 24 or spent < 0.02:      # unter 30 Minuten / 2 Cent: zu unsicher
         return None
-    return total / (spent / days)
+    return spent / span
 
 
 def fetch_deepseek(cfg):
@@ -527,15 +527,23 @@ def fetch_deepseek(cfg):
     used = 0.0 if budget <= 0 else max(0.0, min(100.0, 100.0 * (1 - total / budget)))
     ref = "BUDGET" if cfg_budget > 0 else "MAX"
 
-    # Zeile 1: aufgeladenes Guthaben, Zeile 2: Balken-Bezug + Reichweite
+    # Zeile 1: aufgeladenes Guthaben + Verbrauch/Tag, Zeile 2: Balken-Bezug + Prognose
+    burn = ds_burn(hist, total, now)
+    days = (total / burn) if burn else None
     line1 = f"AUFGELADEN {ds_money(topped, sym)}"
-    if granted > 0:
-        line1 += f"  //  GRANT {ds_money(granted, sym)}"
-    days = ds_days_left(hist, total, now)
     line2 = f"{ref} {ds_money(budget, sym)}"
-    if days is not None:
-        left = f"~{days:.0f} TAGE" if days >= 1 else "< 1 TAG"
-        line2 += f"  //  NOCH {left}"
+    if burn:
+        line1 += f"  //  -{ds_money(burn, sym)}/TAG"
+        if days >= 365:
+            line2 += "  //  NOCH > 1 JAHR"
+        elif days >= 1:
+            line2 += f"  //  NOCH ~{days:.0f} TAGE"
+        else:
+            line2 += "  //  NOCH < 1 TAG"
+    else:
+        if granted > 0:
+            line1 += f"  //  GRANT {ds_money(granted, sym)}"
+        line2 += "  //  PROGNOSE AB 1 STD"
     if not data.get("is_available", True):
         line1, line2 = "GUTHABEN AUFGEBRAUCHT  //  BITTE AUFLADEN", ""
     return [("GUTHABEN", used, None, ds_money(total, sym), line1, line2)]
@@ -549,7 +557,7 @@ def demo_fetch(key):
                 ("WOCHE", random.uniform(60, 70), now + dt.timedelta(days=5, hours=20))]
     if key == "deepseek":
         return [("GUTHABEN", 62.0, None, "$7,60",
-                 "AUFGELADEN $5,60  //  GRANT $2,00",
+                 "AUFGELADEN $5,60  //  -$0,80/TAG",
                  "MAX $20,00  //  NOCH ~9 TAGE")]
     return [("5 STD", random.uniform(80, 92), now + dt.timedelta(minutes=47)),
             ("WOCHE", random.uniform(30, 40), now + dt.timedelta(days=2, hours=6))]
@@ -855,6 +863,8 @@ class Widget:
         conf = self.cfg.get(key) or {}
         if not conf.get("enabled", True):
             return False
+        if DEMO:            # Vorschau zeigt immer alle Karten
+            return True
         if key == "deepseek" and conf.get("hide_without_key", True):
             if not (str(conf.get("api_key") or "").strip()
                     or os.environ.get("DEEPSEEK_API_KEY", "").strip()):
