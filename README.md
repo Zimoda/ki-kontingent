@@ -1,6 +1,6 @@
 # KI-Kontingent
 
-Kleines Desktop-Widget für **Windows und macOS**, das deine Nutzungslimits von **Claude** und **ChatGPT** sowie dein **DeepSeek-API-Guthaben** anzeigt – mit verbleibenden Prozent, Reset-Zeitpunkt und Countdown. Aktualisiert sich automatisch.
+Kleines Desktop-Widget für **Windows und macOS**, das deine Nutzungslimits von **Claude** und **ChatGPT**, dein **Gemini**-Kontingent sowie dein **DeepSeek-API-Guthaben** anzeigt – mit verbleibenden Prozent, Reset-Zeitpunkt und Countdown. Aktualisiert sich automatisch.
 
 > Inoffizielles Projekt, nicht verbunden mit Anthropic, OpenAI oder DeepSeek. Es nutzt nicht dokumentierte Schnittstellen, die sich jederzeit ändern können.
 
@@ -23,12 +23,13 @@ Das Widget liest die Anmeldung, die schon auf deinem Rechner liegt:
 | Claude | [Claude Code](https://claude.com/claude-code) einmal angemeldet | 5-Stunden- und Wochenlimit deines Abos |
 | ChatGPT | [Codex](https://openai.com/codex) (App oder CLI) einmal mit ChatGPT angemeldet | Codex-Limits (5 Std. + Woche) deines Abos |
 | DeepSeek | API-Key von [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) | Guthaben in USD (kein Zeitfenster-Limit) |
+| Gemini | [Gemini CLI](https://github.com/google-gemini/gemini-cli) einmal mit Google angemeldet | Kontingent pro Modell (Code Assist) |
 
-Ein Anbieter ohne Login zeigt einfach „Nicht angemeldet“. In der Konfiguration kannst du ihn mit `"enabled": false` ausblenden. Die DeepSeek-Karte erscheint erst, wenn ein API-Key hinterlegt ist – ohne Key wird sie automatisch weggelassen (`"hide_without_key": true`).
+Ein Anbieter ohne Login zeigt einfach „Nicht angemeldet“. In der Konfiguration kannst du ihn mit `"enabled": false` ausblenden. Die DeepSeek-Karte erscheint erst, wenn ein API-Key hinterlegt ist – ohne Key wird sie automatisch weggelassen (`"hide_without_key": true`); die Gemini-Karte ebenso ohne CLI-Login (`"hide_without_login": true`).
 
-**Datenschutz:** Die Zugangsdaten verlassen deinen Rechner nur in Richtung des jeweiligen Anbieters (Anthropic, OpenAI bzw. DeepSeek). Es gibt keinen eigenen Server, keine Telemetrie.
+**Datenschutz:** Die Zugangsdaten verlassen deinen Rechner nur in Richtung des jeweiligen Anbieters (Anthropic, OpenAI, Google bzw. DeepSeek). Es gibt keinen eigenen Server, keine Telemetrie.
 
-Läuft der Login ab, erneuert das Widget ihn automatisch und speichert ihn zurück – Claude Code bzw. Codex bleiben dabei angemeldet. Nur wenn das nicht klappt (z. B. nach Abmelden), erscheint „Login abgelaufen“: dann Claude Code bzw. Codex einmal starten und anmelden.
+Läuft der Login ab, erneuert das Widget ihn automatisch und speichert ihn zurück – Claude Code, Codex und die Gemini CLI bleiben dabei angemeldet. Nur wenn das nicht klappt (z. B. nach Abmelden), erscheint „Login abgelaufen“: dann die jeweilige CLI einmal starten und anmelden.
 
 ## DeepSeek-Guthaben
 Die DeepSeek-API kennt keine 5-Stunden- oder Wochenfenster. Abrufbar ist nur das Guthaben (`GET https://api.deepseek.com/user/balance`), deshalb zeigt die Karte:
@@ -44,6 +45,32 @@ Die DeepSeek-API kennt keine 5-Stunden- oder Wochenfenster. Abrufbar ist nur das
 | `NOCH ~9 TAGE` | Prognose: Guthaben ÷ Verbrauch pro Tag |
 
 Die Messpunkte dafür liegen in `deepseek_history.json` neben der `config.json` (jeder Abruf ein Messpunkt, 30 Tage Aufbewahrung, pro Währung getrennt). Die Prognose erscheint, sobald zwei Messpunkte über mindestens eine halbe Stunde vorliegen – also nach etwa einer Stunde Laufzeit.
+
+## Gemini-Kontingent
+Die Gemini-Karte nutzt den Login der **Gemini CLI** (`~/.gemini/oauth_creds.json`) und fragt
+die Code-Assist-API (`retrieveUserQuota`) nach dem Kontingent pro Modell. Angezeigt werden
+verbleibender Anteil und Reset-Zeitpunkt – wie bei Claude.
+
+```powershell
+npm.cmd install -g @google/gemini-cli
+gemini        # beim ersten Start "Login with Google"
+```
+
+Free, AI Pro und AI Ultra funktionieren mit demselben Google-Konto; je nach Tarif erscheinen
+mehr Modelle. Ohne Login wird die Karte weggelassen (`"hide_without_login": true`).
+
+```json
+"gemini": {
+  "enabled": true,
+  "creds_path": "",
+  "models": [],
+  "hide_without_login": true
+}
+```
+
+`models` filtert optional per Teilstring (z. B. `["2.5-pro"]`), leer = alle Modelle (max. vier
+Zeilen). Ein AI-Studio-API-Key liefert kein Kontingent – Google veröffentlicht dafür keine
+Schnittstelle.
 
 ## Bedienung
 - Ziehen mit linker Maustaste · Doppelklick = aktualisieren

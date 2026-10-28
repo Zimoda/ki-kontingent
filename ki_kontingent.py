@@ -8,6 +8,7 @@ Linke Maustaste ziehen = verschieben | Doppelklick = aktualisieren
 Rechtsklick = Menue | Start mit --demo zeigt Beispieldaten
 """
 import datetime as dt
+import glob
 import json
 import math
 import os
@@ -18,9 +19,10 @@ import threading
 import time
 import tkinter as tk
 import urllib.error
+import urllib.parse
 import urllib.request
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 HOME = os.path.expanduser("~")
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -52,6 +54,7 @@ DEFAULT_CONFIG = {
     "opacity": 0.94,
     "claude": {"enabled": True, "credentials_path": "", "session_key": ""},
     "chatgpt": {"enabled": True, "auth_path": ""},
+    "gemini": {"enabled": True, "creds_path": "", "models": [], "hide_without_login": True},
     "deepseek": {"enabled": True, "api_key": "", "currency": "USD", "budget": 0,
                  "hide_without_key": True},
 }
@@ -210,8 +213,15 @@ CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 DS_ACCENT = "#4d6bfe"
-DS_SYMBOL = {"CNY": "Â¥", "USD": "$"}
+DS_SYMBOL = {"CNY": "¥", "USD": "$"}
 DS_HISTORY_PATH = os.path.join(APP_DIR, "deepseek_history.json")
+
+# Gemini CLI (Code Assist): OAuth-Login der CLI, Kontingent pro Modell
+GEMINI_CODE_ASSIST = "https://cloudcode-pa.googleapis.com/v1internal:"
+GEMINI_OAUTH_URL = "https://oauth2.googleapis.com/token"
+GEMINI_CREDS = os.path.join(HOME, ".gemini", "oauth_creds.json")
+GEMINI_ACCENT = "#8e7bff"
+_GEMINI_CLIENT = {}
 
 
 class LoginExpired(Exception):
@@ -227,6 +237,15 @@ def http_post_json(url, body, headers=None, timeout=20):
     h.update(headers or {})
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                  headers=h, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def http_post_form(url, fields, timeout=20):
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded",
+                                          "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -448,6 +467,141 @@ def fetch_chatgpt(cfg):
     return rows
 
 
+# ---- Gemini CLI: Modell-Kontingente ueber die Code-Assist-API der CLI.
+def gemini_oauth_client():
+    """OAuth-Client der installierten Gemini CLI lesen - gehoert nicht ins Repo."""
+    if _GEMINI_CLIENT.get("id"):
+        return _GEMINI_CLIENT["id"], _GEMINI_CLIENT["secret"]
+    cid = os.environ.get("GEMINI_CLI_CLIENT_ID", "").strip()
+    sec = os.environ.get("GEMINI_CLI_CLIENT_SECRET", "").strip()
+    if cid and sec:
+        _GEMINI_CLIENT.update(id=cid, secret=sec)
+        return cid, sec
+    roots = [
+        os.path.join(os.environ.get("APPDATA", ""), "npm", "node_modules", "@google", "gemini-cli"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "nodejs", "node_modules", "@google", "gemini-cli"),
+        "/usr/local/lib/node_modules/@google/gemini-cli",
+        "/opt/homebrew/lib/node_modules/@google/gemini-cli",
+        os.path.join(HOME, ".npm-global", "lib", "node_modules", "@google", "gemini-cli"),
+    ]
+    pat_id = re.compile(r"[0-9]{8,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com")
+    pat_sec = re.compile(r"GOCSPX-[A-Za-z0-9_\-]{10,}")
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for path in glob.glob(os.path.join(root, "bundle", "*.js")) + [os.path.join(root, "gemini.js")]:
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except Exception:
+                continue
+            mid, msec = pat_id.search(text), pat_sec.search(text)
+            if mid and msec:
+                _GEMINI_CLIENT.update(id=mid.group(0), secret=msec.group(0))
+                return _GEMINI_CLIENT["id"], _GEMINI_CLIENT["secret"]
+    raise ValueError("Gemini CLI nicht gefunden (npm install -g @google/gemini-cli)")
+
+
+class GeminiCredentials:
+    """OAuth-Login, den die Gemini CLI in ~/.gemini/oauth_creds.json ablegt."""
+
+    def __init__(self, custom_path=""):
+        self.path = custom_path or GEMINI_CREDS
+
+    def load(self):
+        return read_json(self.path)
+
+    def save(self, data):
+        write_json_atomic(self.path, data)
+
+
+def gemini_refresh(store):
+    d = store.load()
+    rt = (d or {}).get("refresh_token")
+    if not rt:
+        raise LoginExpired("gemini")
+    try:
+        client_id, client_secret = gemini_oauth_client()
+        tok = http_post_form(GEMINI_OAUTH_URL, {
+            "client_id": client_id, "client_secret": client_secret,
+            "grant_type": "refresh_token", "refresh_token": rt})
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401):
+            raise LoginExpired("gemini")
+        raise
+    d["access_token"] = tok["access_token"]
+    if tok.get("expires_in"):
+        d["expiry_date"] = int((time.time() + float(tok["expires_in"])) * 1000)
+    for key in ("refresh_token", "scope", "token_type", "id_token"):
+        if tok.get(key):
+            d[key] = tok[key]
+    store.save(d)
+    return d
+
+
+def gemini_post(token, method, payload):
+    return http_post_json(GEMINI_CODE_ASSIST + method, payload,
+                          {"Authorization": f"Bearer {token}",
+                           "User-Agent": "GeminiCLI/0.1 (ki-kontingent)"})
+
+
+def gemini_request(store, d, method, payload):
+    """Ein Aufruf, bei 401 einmal Token erneuern und wiederholen."""
+    try:
+        return d, gemini_post(d["access_token"], method, payload)
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+    d = gemini_refresh(store)
+    return d, gemini_post(d["access_token"], method, payload)
+
+
+def gemini_label(model_id):
+    """gemini-2.5-pro -> 2.5 PRO, gemini-3-pro-preview -> 3 PRO."""
+    m = model_id.lower().replace("gemini-", "").replace("-preview", "")
+    parts = [p for p in m.split("-") if p]
+    if parts and parts[0][:1].isdigit():
+        rest = " ".join(p.upper() for p in parts[1:])
+        return (parts[0] + " " + rest).strip()
+    return model_id.upper()
+
+
+def fetch_gemini(cfg):
+    c = cfg.get("gemini") or {}
+    store = GeminiCredentials(c.get("creds_path"))
+    d = store.load()                       # fehlt -> FileNotFoundError
+    exp = (d.get("expiry_date") or 0) / 1000
+    if not d.get("access_token") or (exp and exp < time.time() + 120):
+        d = gemini_refresh(store)
+
+    meta = {"metadata": {"pluginType": "GEMINI_CLI", "pluginVersion": "1.0.0"}}
+    d, assist = gemini_request(store, d, "loadCodeAssist", meta)
+    project = assist.get("cloudaicompanionProject") or c.get("project")
+    if not project:
+        raise ValueError("Kein Gemini-Projekt gefunden (debug aktivieren)")
+
+    d, quota = gemini_request(store, d, "retrieveUserQuota", {"project": project})
+    debug_dump(cfg, "gemini", {"assist": assist, "quota": quota})
+
+    want = [str(m).lower() for m in (c.get("models") or [])]
+    rows = []
+    for b in quota.get("buckets") or []:
+        if not isinstance(b, dict):
+            continue
+        mid = b.get("modelId") or ""
+        frac = b.get("remainingFraction")
+        if not mid or frac is None:
+            continue
+        if want and not any(w in mid.lower() for w in want):
+            continue
+        used = (1.0 - max(0.0, min(1.0, float(frac)))) * 100.0
+        rows.append((gemini_label(mid), used, parse_time(b.get("resetTime"))))
+    if not rows:
+        raise ValueError("Keine Kontingent-Daten (debug aktivieren)")
+    rows.sort(key=lambda r: 0 if "PRO" in r[0] else 1)
+    return rows[:4]
+
+
 # ---- DeepSeek: die API kennt kein Zeitfenster-Limit, nur ein Guthaben.
 def ds_money(v, sym):
     s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -555,6 +709,9 @@ def demo_fetch(key):
     if key == "claude":
         return [("5 STD", random.uniform(20, 45), now + dt.timedelta(hours=3, minutes=31)),
                 ("WOCHE", random.uniform(60, 70), now + dt.timedelta(days=5, hours=20))]
+    if key == "gemini":
+        return [("2.5 PRO", random.uniform(20, 40), now + dt.timedelta(hours=17, minutes=12)),
+                ("2.5 FLASH", random.uniform(5, 20), now + dt.timedelta(hours=17, minutes=12))]
     if key == "deepseek":
         return [("GUTHABEN", 62.0, None, "$7,60",
                  "AUFGELADEN $5,60  //  -$0,80/TAG",
@@ -565,17 +722,22 @@ def demo_fetch(key):
 
 PROVIDERS = [("claude", "CLAUDE", "#ff8a5c", fetch_claude),
              ("chatgpt", "CHATGPT", "#19e6a7", fetch_chatgpt),
+             ("gemini", "GEMINI", GEMINI_ACCENT, fetch_gemini),
              ("deepseek", "DEEPSEEK API", DS_ACCENT, fetch_deepseek)]
 
 
 def friendly_error(e, provider=""):
     if isinstance(e, LoginExpired) and e.provider == "deepseek":
         return "KEIN API-KEY  -  config.json: deepseek.api_key"
+    if isinstance(e, LoginExpired) and e.provider == "gemini":
+        return "NICHT ANGEMELDET  -  Gemini CLI einmal starten"
     if isinstance(e, LoginExpired):
         if e.provider == "claude":
             return "LOGIN ABGELAUFEN  -  Claude Code einmal starten und anmelden"
         return "LOGIN ABGELAUFEN  -  Codex einmal starten und anmelden"
     if isinstance(e, FileNotFoundError):
+        if provider == "gemini":
+            return "NICHT ANGEMELDET  -  Gemini CLI einmal starten"
         return "NICHT ANGEMELDET  -  Login-Datei fehlt"
     if isinstance(e, urllib.error.HTTPError):
         if provider == "deepseek" and e.code == 402:
@@ -589,6 +751,8 @@ def friendly_error(e, provider=""):
         return f"SERVERFEHLER {e.code}"
     if isinstance(e, urllib.error.URLError):
         return "KEINE VERBINDUNG"
+    if "Gemini CLI nicht gefunden" in str(e):
+        return "GEMINI CLI FEHLT  -  npm install -g @google/gemini-cli"
     return str(e)[:60]
 
 
@@ -640,7 +804,7 @@ class Row:
         self.shown = None      # aktuell angezeigter (animierter) Wert, 0..100 frei
         self.target = 0.0
         self.reset = None
-        self.value_text = None  # statt "62%" z. B. "Â¥7,60"
+        self.value_text = None  # statt "62%" z. B. "¥7,60"
         self.sub_text = None    # feste Unterzeile statt Reset-Countdown
         self.frame = tk.Frame(parent, bg=PANEL)
         top = tk.Frame(self.frame, bg=PANEL)
@@ -865,6 +1029,9 @@ class Widget:
             return False
         if DEMO:            # Vorschau zeigt immer alle Karten
             return True
+        if key == "gemini" and conf.get("hide_without_login", True):
+            if not os.path.exists(conf.get("creds_path") or GEMINI_CREDS):
+                return False
         if key == "deepseek" and conf.get("hide_without_key", True):
             if not (str(conf.get("api_key") or "").strip()
                     or os.environ.get("DEEPSEEK_API_KEY", "").strip()):
